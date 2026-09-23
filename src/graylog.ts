@@ -1,5 +1,5 @@
 import { Agent, fetch, type Dispatcher } from "undici";
-import type { Config } from "./config.js";
+import type { InstanceConfig } from "./config.js";
 
 export type TimeRange =
   | { type: "relative"; range: number }
@@ -46,11 +46,15 @@ export class GraylogClient {
   private readonly authHeader: string;
   private readonly dispatcher?: Dispatcher;
 
-  constructor(private readonly config: Config) {
+  constructor(private readonly config: InstanceConfig) {
     this.authHeader = "Basic " + Buffer.from(`${config.token}:token`).toString("base64");
     if (!config.verifySsl) {
       this.dispatcher = new Agent({ connect: { rejectUnauthorized: false } });
     }
+  }
+
+  private get tag(): string {
+    return `[${this.config.name}]`;
   }
 
   private async request<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
@@ -72,23 +76,25 @@ export class GraylogClient {
     } catch (err) {
       const e = err as Error & { cause?: Error };
       const cause = e.cause?.message ? ` (${e.cause.message})` : "";
-      throw new GraylogError(`Request to ${url} failed: ${e.message}${cause}`);
+      throw new GraylogError(`${this.tag} Request to ${url} failed: ${e.message}${cause}`);
     }
 
     const text = await res.text();
     if (!res.ok) {
       let hint = "";
-      if (res.status === 401) hint = " — check GRAYLOG_TOKEN";
+      if (res.status === 401) hint = ` — check ${this.config.tokenEnv}`;
       else if (res.status === 403) hint = " — the token's user lacks permission for this resource";
       throw new GraylogError(
-        `Graylog ${method} ${path} returned HTTP ${res.status}${hint}: ${extractError(text)}`,
+        `${this.tag} Graylog ${method} ${path} returned HTTP ${res.status}${hint}: ${extractError(text)}`,
         res.status,
       );
     }
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new GraylogError(`Graylog ${method} ${path} returned non-JSON response: ${truncate(text, 500)}`);
+      throw new GraylogError(
+        `${this.tag} Graylog ${method} ${path} returned non-JSON response: ${truncate(text, 500)}`,
+      );
     }
   }
 
@@ -119,11 +125,11 @@ export class GraylogClient {
     const errors: any[] = [...(res?.errors ?? []), ...(result?.errors ?? [])];
     if (errors.length) {
       throw new GraylogError(
-        "Search failed: " + errors.map((e) => e.description ?? e.message ?? JSON.stringify(e)).join("; "),
+        `${this.tag} Search failed: ` + errors.map((e) => e.description ?? e.message ?? JSON.stringify(e)).join("; "),
       );
     }
     const st = result?.search_types?.[SEARCH_TYPE_ID];
-    if (!st) throw new GraylogError("Unexpected search response: no messages result");
+    if (!st) throw new GraylogError(`${this.tag} Unexpected search response: no messages result`);
     return {
       total: st.total_results ?? 0,
       messages: (st.messages ?? []).map((m: any) => ({ index: m.index, message: m.message ?? {} })),

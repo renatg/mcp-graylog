@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import type { Config } from "./config.js";
+import type { Config, InstanceConfig } from "./config.js";
 import { GraylogClient, type TimeRange } from "./graylog.js";
 
 const MESSAGE_MAX_CHARS = 2000;
@@ -36,7 +36,46 @@ function shapeMessage(
 }
 
 export function registerTools(server: McpServer, config: Config): void {
-  const client = new GraylogClient(config);
+  const clients = new Map<string, { instance: InstanceConfig; client: GraylogClient }>();
+  for (const instance of config.instances) {
+    clients.set(instance.name.toLowerCase(), { instance, client: new GraylogClient(instance) });
+  }
+  const available = config.instances.map((i) => i.name).join(", ");
+
+  function resolve(name?: string): { instance: InstanceConfig; client: GraylogClient } {
+    const key = (name?.trim() || config.defaultInstance).toLowerCase();
+    const entry = clients.get(key);
+    if (!entry) throw new Error(`Unknown instance "${name}". Available: ${available}`);
+    return entry;
+  }
+
+  const instanceParam = z
+    .string()
+    .optional()
+    .describe(
+      "Graylog instance: " +
+        config.instances
+          .map((i) => (i.name === config.defaultInstance ? `${i.name} (default)` : i.name))
+          .join(", "),
+    );
+
+  server.registerTool(
+    "list_instances",
+    {
+      title: "List Graylog instances",
+      description: "List configured Graylog instances. Pass `instance` to other tools to choose one.",
+      inputSchema: {},
+    },
+    async () =>
+      ok(
+        config.instances.map((i) => ({
+          name: i.name,
+          url: i.baseUrl,
+          default: i.name === config.defaultInstance,
+          verifySsl: i.verifySsl,
+        })),
+      ),
+  );
 
   server.registerTool(
     "search_messages",
@@ -49,6 +88,7 @@ export function registerTools(server: McpServer, config: Config): void {
         "Returns total hit count and the matching messages (long `message` fields are truncated; " +
         "use get_message for the full content).",
       inputSchema: {
+        instance: instanceParam,
         query: z.string().default("*").describe("Graylog search query; `*` matches everything"),
         range_seconds: z
           .number()
@@ -63,13 +103,19 @@ export function registerTools(server: McpServer, config: Config): void {
           .array(z.string())
           .optional()
           .describe("Return only these fields (plus timestamp, source, message). Omit to return all fields"),
-        limit: z.number().int().positive().default(50).describe(`Max messages to return (capped at ${config.maxLimit})`),
+        limit: z
+          .number()
+          .int()
+          .positive()
+          .default(50)
+          .describe("Max messages to return (capped by the instance's max limit)"),
         offset: z.number().int().nonnegative().default(0).describe("Offset for paging"),
         sort: z.enum(["asc", "desc"]).default("desc").describe("Sort by timestamp"),
       },
     },
-    async ({ query, range_seconds, from, to, streams, fields, limit, offset, sort }) => {
+    async ({ instance: instanceName, query, range_seconds, from, to, streams, fields, limit, offset, sort }) => {
       try {
+        const { instance, client } = resolve(instanceName);
         let timerange: TimeRange;
         if (from || to) {
           if (!from) return fail("`from` is required when `to` is set");
@@ -84,7 +130,7 @@ export function registerTools(server: McpServer, config: Config): void {
           timerange = { type: "relative", range: range_seconds ?? 900 };
         }
 
-        const effectiveLimit = Math.min(limit, config.maxLimit);
+        const effectiveLimit = Math.min(limit, instance.maxLimit);
         const result = await client.searchMessages({
           query: query.trim() || "*",
           timerange,
@@ -94,6 +140,7 @@ export function registerTools(server: McpServer, config: Config): void {
           sort,
         });
         return ok({
+          instance: instance.name,
           total: result.total,
           returned: result.messages.length,
           offset,
@@ -111,11 +158,11 @@ export function registerTools(server: McpServer, config: Config): void {
     {
       title: "List Graylog streams",
       description: "List Graylog streams (id, title, description, disabled). Use stream IDs to filter search_messages.",
-      inputSchema: {},
+      inputSchema: { instance: instanceParam },
     },
-    async () => {
+    async ({ instance }) => {
       try {
-        return ok(await client.listStreams());
+        return ok(await resolve(instance).client.listStreams());
       } catch (err) {
         return fail(err);
       }
@@ -126,15 +173,18 @@ export function registerTools(server: McpServer, config: Config): void {
     "get_message",
     {
       title: "Get Graylog message",
-      description: "Fetch a single message with all its fields by index name and message ID (both returned by search_messages).",
+      description:
+        "Fetch a single message with all its fields by index name and message ID (both returned by search_messages). " +
+        "Use the same `instance` as in the search.",
       inputSchema: {
+        instance: instanceParam,
         index: z.string().min(1).describe("Index name, e.g. graylog_42"),
         id: z.string().min(1).describe("Message ID (`id` from search results)"),
       },
     },
-    async ({ index, id }) => {
+    async ({ instance, index, id }) => {
       try {
-        return ok(await client.getMessage(index, id));
+        return ok(await resolve(instance).client.getMessage(index, id));
       } catch (err) {
         return fail(err);
       }

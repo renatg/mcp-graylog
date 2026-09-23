@@ -11,7 +11,10 @@ async function main(): Promise<void> {
 
   await server.connect(new StdioServerTransport());
   // stdout is reserved for the MCP protocol; log to stderr only.
-  console.error(`mcp-graylog connected (${config.baseUrl}, verifySsl=${config.verifySsl})`);
+  const instances = config.instances
+    .map((i) => `${i.name}=${i.baseUrl}${i.verifySsl ? "" : " (verifySsl=false)"}`)
+    .join(", ");
+  console.error(`mcp-graylog connected (${instances}; default=${config.defaultInstance})`);
 }
 
 main().catch((err) => {
