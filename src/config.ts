@@ -17,6 +17,8 @@ export interface Config {
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_LIMIT = 500;
 const INSTANCE_NAME_RE = /^[A-Za-z0-9_-]+$/;
+// Whole value of the form ${VAR}: the token is read from env variable VAR.
+const ENV_REF_RE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/;
 
 function parseBool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
@@ -39,6 +41,22 @@ function normalizeBaseUrl(url: string): string {
   return baseUrl;
 }
 
+function resolveToken(
+  env: NodeJS.ProcessEnv,
+  varName: string,
+  notSetMessage: string,
+): { token: string; tokenEnv: string } {
+  const raw = env[varName]?.trim();
+  if (!raw) throw new Error(notSetMessage);
+
+  const ref = ENV_REF_RE.exec(raw)?.[1];
+  if (!ref) return { token: raw, tokenEnv: varName };
+
+  const token = env[ref]?.trim();
+  if (!token) throw new Error(`${varName} references \${${ref}}, but ${ref} is not set`);
+  return { token, tokenEnv: `${ref} (via ${varName})` };
+}
+
 interface Defaults {
   verifySsl: boolean;
   timeoutMs: number;
@@ -55,20 +73,18 @@ function loadDefaults(env: NodeJS.ProcessEnv): Defaults {
 
 function loadLegacy(env: NodeJS.ProcessEnv): Config {
   const url = env.GRAYLOG_URL?.trim();
-  const token = env.GRAYLOG_TOKEN?.trim();
   if (!url) {
     throw new Error(
       "GRAYLOG_URL is not set (e.g. https://graylog.local:9000); " +
         "for several instances set GRAYLOG_INSTANCES instead",
     );
   }
-  if (!token) throw new Error("GRAYLOG_TOKEN is not set (Graylog API access token)");
+  const auth = resolveToken(env, "GRAYLOG_TOKEN", "GRAYLOG_TOKEN is not set (Graylog API access token)");
 
   const instance: InstanceConfig = {
     name: "default",
     baseUrl: normalizeBaseUrl(url),
-    token,
-    tokenEnv: "GRAYLOG_TOKEN",
+    ...auth,
     ...loadDefaults(env),
   };
   return { instances: [instance], defaultInstance: instance.name };
@@ -77,15 +93,13 @@ function loadLegacy(env: NodeJS.ProcessEnv): Config {
 function loadInstance(env: NodeJS.ProcessEnv, name: string, defaults: Defaults): InstanceConfig {
   const prefix = `GRAYLOG_${name.toUpperCase().replace(/-/g, "_")}_`;
   const url = env[prefix + "URL"]?.trim();
-  const token = env[prefix + "TOKEN"]?.trim();
   if (!url) throw new Error(`${prefix}URL is not set for instance "${name}"`);
-  if (!token) throw new Error(`${prefix}TOKEN is not set for instance "${name}"`);
+  const auth = resolveToken(env, prefix + "TOKEN", `${prefix}TOKEN is not set for instance "${name}"`);
 
   return {
     name,
     baseUrl: normalizeBaseUrl(url),
-    token,
-    tokenEnv: prefix + "TOKEN",
+    ...auth,
     verifySsl: parseBool(env[prefix + "VERIFY_SSL"], defaults.verifySsl),
     timeoutMs: parsePositiveInt(prefix + "TIMEOUT_MS", env[prefix + "TIMEOUT_MS"], defaults.timeoutMs),
     maxLimit: parsePositiveInt(prefix + "MAX_LIMIT", env[prefix + "MAX_LIMIT"], defaults.maxLimit),
