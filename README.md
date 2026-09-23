@@ -103,6 +103,28 @@ claude mcp add graylog -e GRAYLOG_INSTANCES=prod,stage -e GRAYLOG_PROD_URL=https
 }
 ```
 
+**OpenCode** (`opencode.json` в корне проекта или `~/.config/opencode/opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "graylog": {
+      "type": "local",
+      "command": ["node", "C:/Projects/MCPGraylog/dist/index.js"],
+      "enabled": true,
+      "environment": {
+        "GRAYLOG_URL": "https://graylog.local:9000",
+        "GRAYLOG_TOKEN": "xxx",
+        "GRAYLOG_VERIFY_SSL": "false"
+      }
+    }
+  }
+}
+```
+
+В OpenCode переменные окружения задаются в `environment`, а команда с аргументами — одним массивом `command`.
+
 ## Отладка
 
 ```sh
